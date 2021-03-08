@@ -31,7 +31,7 @@ MAKEDIR=$(realpath .)
 # Final installation prefix directory (e.g. /usr/local)
 PREFIX=
 # Temporary installation offset (e.g. /home/myuser/myproject/install)
-# If defined, this dir MUST have write permission!
+# This dir MUST have OWNER permission! (somewhere in your home dir)
 # This will only be a virtual directory, so any writable location is fine.
 ROOT=
 # The package name for the installed software
