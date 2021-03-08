@@ -122,6 +122,7 @@ fi
 
 # Create a chroot jail in the newly created layered filesystem
 chroot "$TMPDIR/root" bash << EOM2
+set -e
 
 # Install (run "make install")
 cd $MAKEDIR
