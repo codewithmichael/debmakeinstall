@@ -1,0 +1,171 @@
+#!/bin/bash
+#
+# SCRIPT:  debmakeinstall
+# AUTHOR:  Michael Spencer <code.with.michael@gmail.com>
+# CREATED: 2021.03.07
+# LICENSE: MIT
+#
+
+# Exit on command failure
+set -e
+
+
+# ----------------------------------------------------------------------------
+# CONFIG
+# ----------------------------------------------------------------------------
+
+# APP is used to generate TMPDIR
+APP=debmakeinstall
+# FSDIR is the parent directory to use in creating a temporary workspace
+# This should be a tmpfs mount (/dev/shm or /tmp)
+# FSDIR is used to generate TMPDIR
+FSDIR=/dev/shm
+# MAKEDIR is the directory in which we'll run make install (the current dir)
+MAKEDIR=$(realpath .)
+
+
+# ----------------------------------------------------------------------------
+# OPTIONS
+# ----------------------------------------------------------------------------
+
+# Final installation prefix directory (e.g. /usr/local)
+PREFIX=
+# Temporary installation offset (e.g. /home/myuser/myproject/install)
+# If defined, this dir MUST have write permission!
+# This will only be a virtual directory, so any writable location is fine.
+ROOT=
+# The package name for the installed software
+# Default is the name of the current directory
+NAME="$(basename "$MAKEDIR")"
+VERSION="1.0.0"
+MAINTAINER="Unknown"
+SECTION="misc"
+DEPENDS=
+DESCRIPTION= # will default to name if not provided
+# Who should own the final package (used for calling chown on the final deb)
+USER=
+
+# Parse script options
+for o in "$@"; do
+    case "$o" in
+        --prefix=* )      PREFIX=${o#--prefix=} ;;
+        --root=* )        ROOT=${o#--root=} ;;
+        --name=* )        NAME=${o#--name=} ;;
+        --version=* )     VERSION=${o#--version=} ;;
+        --maintainer=* )  MAINTAINER=${o#--maintainer=} ;;
+        --section=* )     SECTION=${o#--section=} ;;
+        --depends=* )     DEPENDS=${o#--depends=} ;;
+        --description=* ) DESCRIPTION=${o#--description=} ;;
+        --user=* )        USER=${o#--user=} ;;
+
+        * ) >&2 echo "Unknown parameter: $o"
+            >&2 echo "Exiting..."
+            exit 1
+            ;;
+    esac
+done
+if [ -z "$DESCRIPTION" ]; then
+    DESCRIPTION="$NAME"
+fi
+
+
+# ----------------------------------------------------------------------------
+# PREPARATION
+# ----------------------------------------------------------------------------
+
+# Set where install files will be placed
+if [ -n "$ROOT" ]; then
+    ROOT=$(realpath -m "$ROOT" 2>/dev/null)
+fi
+ROOTPREFIX=$(realpath -m "$ROOT$PREFIX" || echo '')
+
+# Define a temporary workspace and prepare cleanup in case of failure
+TMPDIR="$FSDIR/$APP-$(uuidgen)"
+function cleanup {
+    echo "Cleaning up..."
+    rm -rf "$TMPDIR"
+}
+trap cleanup EXIT
+
+# Create temporary directory structure for chroot
+mkdir "$TMPDIR"
+pushd "$TMPDIR"
+mkdir lower upper work root
+# Ensure writable prefix directory
+if [ -n "$ROOTPREFIX" ]; then
+    mkdir -p "lower$ROOTPREFIX"
+fi
+popd
+
+
+# ----------------------------------------------------------------------------
+# JAIL + BUILD
+# ----------------------------------------------------------------------------
+
+# Run unshare to drop into a user namespace as fake root
+unshare -rm << EOM
+set -e
+
+# Mount a layered filesystem (based on /) to separately store installed files
+mount \
+    -t overlay \
+    -o lowerdir="$TMPDIR/lower":/,upperdir="$TMPDIR/upper",workdir="$TMPDIR/work" \
+    none "$TMPDIR/root"
+
+# Bind mount virtual filesystems to ensure access in the chroot jail
+for d in /dev /proc /sys /run; do
+    echo mount --rbind "\$d" "$TMPDIR/root\$d"
+done
+if [ /tmp = "$FSDIR" ]; then
+    mount --rbind /tmp "$TMPDIR/root/tmp"
+fi
+
+# Create a chroot jail in the newly created layered filesystem
+chroot "$TMPDIR/root" bash << EOM2
+
+# Install (run "make install")
+cd $MAKEDIR
+if [ -n "$ROOTPREFIX" ]; then
+    PREFIX="$ROOTPREFIX" make install
+else
+    make install
+fi
+exit
+EOM2
+
+exit
+EOM
+
+
+# ----------------------------------------------------------------------------
+# PACKAGE
+# ----------------------------------------------------------------------------
+
+PACKAGEROOT=$(realpath "$TMPDIR/upper$ROOT")
+DEBPATH="$PWD/${NAME}_${VERSION}.deb"
+
+pushd "$PACKAGEROOT"
+echo "PACKAGE FILES:" && find . | sed -e 's/^\.//' | grep . | sed -e 's/^/  /'
+popd
+
+mkdir "$PACKAGEROOT/DEBIAN"
+cat << EOF >"$PACKAGEROOT/DEBIAN/control"
+Package: $NAME
+Version: $VERSION
+Maintainer: $MAINTAINER
+Architecture: all
+Essential: no
+Section: $SECTION
+Priority: optional
+Depends: $DEPENDS
+Installed-Size: $(du -kd0 | cut -f1)
+Description: $DESCRIPTION
+EOF
+cd ..
+
+fakeroot dpkg-deb --build "$PACKAGEROOT" "$DEBPATH"
+if [ -n "$USER" ]; then
+    chown "$USER":"$USER" "$DEBPATH"
+fi
+
+echo "Done"
